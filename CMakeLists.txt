@@ -1,15 +1,7 @@
-#=============================================================================
-# CMake - Cross Platform Makefile Generator
-# Copyright 2000-2012 Kitware, Inc., Insight Software Consortium
-#
-# Distributed under the OSI-approved BSD License (the "License");
-# see accompanying file Copyright.txt for details.
-#
-# This software is distributed WITHOUT ANY WARRANTY; without even the
-# implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
-# See the License for more information.
-#=============================================================================
-cmake_minimum_required(VERSION 2.8.4 FATAL_ERROR)
+# Distributed under the OSI-approved BSD 3-Clause License.  See accompanying
+# file Copyright.txt or https://cmake.org/licensing for details.
+
+cmake_minimum_required(VERSION 2.8.12.2 FATAL_ERROR)
 if(POLICY CMP0025)
   cmake_policy(SET CMP0025 NEW)
 endif()
@@ -26,6 +18,16 @@ endif()
 
 if(NOT CMake_TEST_EXTERNAL_CMAKE)
   set(CMake_BIN_DIR ${CMake_BINARY_DIR}/bin)
+endif()
+
+if(CMake_GUI_DISTRIBUTE_WITH_Qt_LGPL)
+  if(CMake_GUI_DISTRIBUTE_WITH_Qt_LGPL MATCHES "^3|2\\.1$")
+    set(USE_LGPL "${CMake_GUI_DISTRIBUTE_WITH_Qt_LGPL}")
+  else()
+    set(USE_LGPL "2.1")
+  endif()
+else()
+  set(USE_LGPL "")
 endif()
 
 if("${CMake_SOURCE_DIR}" STREQUAL "${CMAKE_SOURCE_DIR}")
@@ -57,7 +59,7 @@ if(NOT DEFINED CMAKE_CXX_STANDARD AND NOT CMake_NO_CXX_STANDARD)
   endif()
 endif()
 if(NOT CMake_TEST_EXTERNAL_CMAKE)
-  include(${CMake_SOURCE_DIR}/Source/Checks/cm_cxx11_unordered_map.cmake)
+  include(${CMake_SOURCE_DIR}/Source/Checks/cm_cxx_features.cmake)
 endif()
 
 # option to set the internal encoding of CMake to UTF-8
@@ -83,6 +85,11 @@ option(CMake_INSTALL_DEPENDENCIES
   "Whether to install 3rd-party runtime dependencies" OFF)
 mark_as_advanced(CMake_INSTALL_DEPENDENCIES)
 
+# option to build reference for CMake developers
+option(CMake_BUILD_DEVELOPER_REFERENCE
+  "Build CMake Developer Reference" OFF)
+mark_as_advanced(CMake_BUILD_DEVELOPER_REFERENCE)
+
 #-----------------------------------------------------------------------
 # a macro to deal with system libraries, implemented as a macro
 # simply to improve readability of the main script
@@ -97,7 +104,7 @@ macro(CMAKE_HANDLE_SYSTEM_LIBRARIES)
 
   # Allow the user to enable/disable all system utility library options by
   # defining CMAKE_USE_SYSTEM_LIBRARIES or CMAKE_USE_SYSTEM_LIBRARY_${util}.
-  set(UTILITIES BZIP2 CURL EXPAT FORM JSONCPP LIBARCHIVE LIBLZMA ZLIB)
+  set(UTILITIES BZIP2 CURL EXPAT FORM JSONCPP LIBARCHIVE LIBLZMA LIBUV ZLIB)
   foreach(util ${UTILITIES})
     if(NOT DEFINED CMAKE_USE_SYSTEM_LIBRARY_${util}
         AND DEFINED CMAKE_USE_SYSTEM_LIBRARIES)
@@ -137,6 +144,7 @@ macro(CMAKE_HANDLE_SYSTEM_LIBRARIES)
     "${CMAKE_USE_SYSTEM_LIBRARY_LIBLZMA}" "NOT CMAKE_USE_SYSTEM_LIBARCHIVE" ON)
   option(CMAKE_USE_SYSTEM_FORM "Use system-installed libform" "${CMAKE_USE_SYSTEM_LIBRARY_FORM}")
   option(CMAKE_USE_SYSTEM_JSONCPP "Use system-installed jsoncpp" "${CMAKE_USE_SYSTEM_LIBRARY_JSONCPP}")
+  option(CMAKE_USE_SYSTEM_LIBUV "Use system-installed libuv" "${CMAKE_USE_SYSTEM_LIBRARY_LIBUV}")
 
   # For now use system KWIML only if explicitly requested rather
   # than activating via the general system libs options.
@@ -449,6 +457,55 @@ macro (CMAKE_BUILD_UTILITIES)
   endif()
 
   #---------------------------------------------------------------------
+  # Build libuv library.
+  if(NOT DEFINED CMAKE_USE_LIBUV)
+    set(CMAKE_USE_LIBUV 1)
+    if(APPLE)
+      include(CheckCSourceCompiles)
+      check_c_source_compiles("
+#include <CoreServices/CoreServices.h>
+#include <AvailabilityMacros.h>
+#ifndef MAC_OS_X_VERSION_10_5
+#error \"MAC_OS_X_VERSION_10_5 is not defined\"
+#endif
+int main(void) { return 0; }
+" HAVE_CoreServices_OS_X_10_5)
+      if(NOT HAVE_CoreServices_OS_X_10_5)
+        set(CMAKE_USE_LIBUV 0)
+      endif()
+    elseif(CYGWIN)
+      # libuv does not support Cygwin
+      set(CMAKE_USE_LIBUV 0)
+    elseif(CMAKE_SYSTEM_NAME STREQUAL "HP-UX")
+      # Disable until it can be ported.
+      set(CMAKE_USE_LIBUV 0)
+    elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "sparc")
+      # Disable until it can be ported.
+      set(CMAKE_USE_LIBUV 0)
+    endif()
+  endif()
+  if(CMAKE_USE_LIBUV)
+    if(CMAKE_USE_SYSTEM_LIBUV)
+      if(NOT CMAKE_VERSION VERSION_LESS 3.0)
+        include(${CMake_SOURCE_DIR}/Source/Modules/FindLibUV.cmake)
+      else()
+        message(FATAL_ERROR "CMAKE_USE_SYSTEM_LIBUV requires CMake >= 3.0")
+      endif()
+      if(NOT LIBUV_FOUND)
+        message(FATAL_ERROR
+          "CMAKE_USE_SYSTEM_LIBUV is ON but a libuv is not found!")
+      endif()
+      set(CMAKE_LIBUV_LIBRARIES LibUV::LibUV)
+    else()
+      set(CMAKE_LIBUV_LIBRARIES cmlibuv)
+      add_subdirectory(Utilities/cmlibuv)
+      CMAKE_SET_TARGET_FOLDER(cmlibuv "Utilities/3rdParty")
+    endif()
+  else()
+    set(CMAKE_LIBUV_LIBRARIES)
+  endif()
+
+  #---------------------------------------------------------------------
   # Build XMLRPC library for CMake and CTest.
   if(CTEST_USE_XMLRPC)
     find_package(XMLRPC QUIET REQUIRED libwww-client)
@@ -636,6 +693,18 @@ endif()
 
 # setup some Testing support (a macro defined in this file)
 CMAKE_SETUP_TESTING()
+
+# Check whether to build server mode or not:
+set(CMake_HAVE_SERVER_MODE 0)
+if(NOT CMake_TEST_EXTERNAL_CMAKE AND NOT CMAKE_BOOTSTRAP AND CMAKE_USE_LIBUV)
+  list(FIND CMAKE_CXX_COMPILE_FEATURES cxx_auto_type CMake_HAVE_CXX_AUTO_TYPE)
+  list(FIND CMAKE_CXX_COMPILE_FEATURES cxx_range_for CMake_HAVE_CXX_RANGE_FOR)
+  if(CMake_HAVE_CXX_AUTO_TYPE AND CMake_HAVE_CXX_RANGE_FOR)
+    if(CMake_HAVE_CXX_MAKE_UNIQUE)
+      set(CMake_HAVE_SERVER_MODE 1)
+    endif()
+  endif()
+endif()
 
 if(NOT CMake_TEST_EXTERNAL_CMAKE)
   if(NOT CMake_VERSION_IS_RELEASE)

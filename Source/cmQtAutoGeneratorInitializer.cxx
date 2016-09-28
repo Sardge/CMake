@@ -1,29 +1,40 @@
-/*============================================================================
-  CMake - Cross Platform Makefile Generator
-  Copyright 2004-2011 Kitware, Inc.
-  Copyright 2011 Alexander Neundorf (neundorf@kde.org)
-
-  Distributed under the OSI-approved BSD License (the "License");
-  see accompanying file Copyright.txt for details.
-
-  This software is distributed WITHOUT ANY WARRANTY; without even the
-  implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
-  See the License for more information.
-============================================================================*/
-
+/* Distributed under the OSI-approved BSD 3-Clause License.  See accompanying
+   file Copyright.txt or https://cmake.org/licensing for details.  */
 #include "cmQtAutoGeneratorInitializer.h"
 
+#include "cmAlgorithms.h"
+#include "cmCustomCommandLines.h"
+#include "cmFilePathUuid.h"
+#include "cmGeneratorTarget.h"
+#include "cmGlobalGenerator.h"
 #include "cmLocalGenerator.h"
 #include "cmMakefile.h"
+#include "cmOutputConverter.h"
 #include "cmSourceFile.h"
-
-#include <sys/stat.h>
-
-#include <cmsys/FStream.hxx>
+#include "cmSourceFileLocation.h"
+#include "cmState.h"
+#include "cmSystemTools.h"
+#include "cmTarget.h"
+#include "cmake.h"
 
 #if defined(_WIN32) && !defined(__CYGWIN__)
 #include "cmGlobalVisualStudioGenerator.h"
 #endif
+
+#include <algorithm>
+#include <assert.h>
+#include <cmConfigure.h>
+#include <cmsys/FStream.hxx>
+#include <cmsys/RegularExpression.hxx>
+#include <iostream>
+#include <map>
+#include <set>
+#include <sstream>
+#include <string.h>
+#include <string>
+#include <sys/stat.h>
+#include <utility>
+#include <vector>
 
 static std::string GetAutogenTargetName(cmGeneratorTarget const* target)
 {
@@ -53,51 +64,6 @@ static std::string GetAutogenTargetBuildDir(cmGeneratorTarget const* target)
   return targetDir;
 }
 
-static std::string GetSourceRelativePath(cmGeneratorTarget const* target,
-                                         const std::string& fileName)
-{
-  std::string pathRel;
-  // Test if the file is child to any of the known directories
-  {
-    const std::string fileNameReal = cmsys::SystemTools::GetRealPath(fileName);
-    std::string parentDirectory;
-    bool match(false);
-    {
-      std::string testDirs[4];
-      {
-        cmMakefile* makefile = target->Target->GetMakefile();
-        testDirs[0] = makefile->GetCurrentSourceDirectory();
-        testDirs[1] = makefile->GetCurrentBinaryDirectory();
-        testDirs[2] = makefile->GetHomeDirectory();
-        testDirs[3] = makefile->GetHomeOutputDirectory();
-      }
-      for (int ii = 0; ii != sizeof(testDirs) / sizeof(std::string); ++ii) {
-        const ::std::string testDir =
-          cmsys::SystemTools::GetRealPath(testDirs[ii]);
-        if (!testDir.empty() &&
-            cmsys::SystemTools::IsSubDirectory(fileNameReal, testDir)) {
-          parentDirectory = testDir;
-          match = true;
-          break;
-        }
-      }
-    }
-    // Use root as fallback parent directory
-    if (!match) {
-      cmsys::SystemTools::SplitPathRootComponent(fileNameReal,
-                                                 &parentDirectory);
-    }
-    pathRel = cmsys::SystemTools::RelativePath(
-      parentDirectory, cmsys::SystemTools::GetParentDirectory(fileNameReal));
-  }
-  // Sanitize relative path
-  if (!pathRel.empty()) {
-    pathRel += '/';
-    cmSystemTools::ReplaceString(pathRel, "..", "__");
-  }
-  return pathRel;
-}
-
 static void SetupSourceFiles(cmGeneratorTarget const* target,
                              std::vector<std::string>& skipMoc,
                              std::vector<std::string>& mocSources,
@@ -111,6 +77,7 @@ static void SetupSourceFiles(cmGeneratorTarget const* target,
 
   std::vector<std::string> newRccFiles;
 
+  cmFilePathUuid fpathUuid(makefile);
   for (std::vector<cmSourceFile*>::const_iterator fileIt = srcFiles.begin();
        fileIt != srcFiles.end(); ++fileIt) {
     cmSourceFile* sf = *fileIt;
@@ -129,15 +96,11 @@ static void SetupSourceFiles(cmGeneratorTarget const* target,
       if (ext == "qrc" &&
           !cmSystemTools::IsOn(sf->GetPropertyForUser("SKIP_AUTORCC"))) {
 
-        std::string rcc_output_dir = GetAutogenTargetBuildDir(target);
-        rcc_output_dir += GetSourceRelativePath(target, absFile);
-        cmSystemTools::MakeDirectory(rcc_output_dir.c_str());
+        std::string rcc_output_file = GetAutogenTargetBuildDir(target);
+        // Create output directory
+        cmSystemTools::MakeDirectory(rcc_output_file.c_str());
+        rcc_output_file += fpathUuid.get(absFile, "qrc_", ".cpp");
 
-        std::string basename =
-          cmsys::SystemTools::GetFilenameWithoutLastExtension(absFile);
-
-        std::string rcc_output_file = rcc_output_dir;
-        rcc_output_file += "qrc_" + basename + ".cpp";
         makefile->AppendProperty("ADDITIONAL_MAKE_CLEAN_FILES",
                                  rcc_output_file.c_str(), false);
         makefile->GetOrCreateSource(rcc_output_file, true);
@@ -173,7 +136,7 @@ static void GetCompileDefinitionsAndDirectories(
   std::vector<std::string> includeDirs;
   cmLocalGenerator* localGen = target->GetLocalGenerator();
   // Get the include dirs for this target, without stripping the implicit
-  // include dirs off, see http://public.kitware.com/Bug/view.php?id=13667
+  // include dirs off, see https://gitlab.kitware.com/cmake/cmake/issues/13667
   localGen->GetIncludeDirectories(includeDirs, target, "CXX", config, false);
 
   incs = cmJoin(includeDirs, ";");
@@ -195,7 +158,7 @@ static void SetupAutoMocTarget(
   cmMakefile* makefile = target->Target->GetMakefile();
 
   const char* tmp = target->GetProperty("AUTOMOC_MOC_OPTIONS");
-  std::string _moc_options = (tmp != 0 ? tmp : "");
+  std::string _moc_options = (tmp != CM_NULLPTR ? tmp : "");
   makefile->AddDefinition(
     "_moc_options", cmOutputConverter::EscapeForCMake(_moc_options).c_str());
   makefile->AddDefinition(
@@ -394,7 +357,8 @@ static std::string GetRccExecutable(cmGeneratorTarget const* target)
       return std::string();
     }
     return qt5Rcc->ImportedGetLocation("");
-  } else if (strcmp(qtVersion, "4") == 0) {
+  }
+  if (strcmp(qtVersion, "4") == 0) {
     cmGeneratorTarget* qt4Rcc = lg->FindGeneratorTargetToUse("Qt4::rcc");
     if (!qt4Rcc) {
       cmSystemTools::Error("Qt4::rcc target not found ", targetName.c_str());
@@ -464,7 +428,7 @@ static std::string cmQtAutoGeneratorsStripCR(std::string const& line)
 static std::string ReadAll(const std::string& filename)
 {
   cmsys::ifstream file(filename.c_str());
-  std::stringstream stream;
+  std::ostringstream stream;
   stream << file.rdbuf();
   file.close();
   return stream.str();
@@ -484,8 +448,9 @@ static std::string ListQt5RccInputs(cmSourceFile* sf,
     std::string rccStdOut;
     std::string rccStdErr;
     int retVal = 0;
-    bool result = cmSystemTools::RunSingleCommand(
-      command, &rccStdOut, &rccStdErr, &retVal, 0, cmSystemTools::OUTPUT_NONE);
+    bool result =
+      cmSystemTools::RunSingleCommand(command, &rccStdOut, &rccStdErr, &retVal,
+                                      CM_NULLPTR, cmSystemTools::OUTPUT_NONE);
     if (result && retVal == 0 &&
         rccStdOut.find("--list") != std::string::npos) {
       hasDashDashList = true;
@@ -505,10 +470,11 @@ static std::string ListQt5RccInputs(cmSourceFile* sf,
   std::string rccStdOut;
   std::string rccStdErr;
   int retVal = 0;
-  bool result = cmSystemTools::RunSingleCommand(
-    command, &rccStdOut, &rccStdErr, &retVal, 0, cmSystemTools::OUTPUT_NONE);
+  bool result =
+    cmSystemTools::RunSingleCommand(command, &rccStdOut, &rccStdErr, &retVal,
+                                    CM_NULLPTR, cmSystemTools::OUTPUT_NONE);
   if (!result || retVal) {
-    std::stringstream err;
+    std::ostringstream err;
     err << "AUTOGEN: error: Rcc list process for " << sf->GetFullPath()
         << " failed:\n"
         << rccStdOut << "\n"
@@ -538,7 +504,7 @@ static std::string ListQt5RccInputs(cmSourceFile* sf,
 
         std::string::size_type pos = eline.find(searchString);
         if (pos == std::string::npos) {
-          std::stringstream err;
+          std::ostringstream err;
           err << "AUTOGEN: error: Rcc lists unparsable output " << eline
               << std::endl;
           std::cerr << err.str();
@@ -793,6 +759,7 @@ void cmQtAutoGeneratorInitializer::InitializeAutogenTarget(
       ) {
     std::vector<cmSourceFile*> srcFiles;
     target->GetConfigCommonSourceFiles(srcFiles);
+    cmFilePathUuid fpathUuid(makefile);
     for (std::vector<cmSourceFile*>::const_iterator fileIt = srcFiles.begin();
          fileIt != srcFiles.end(); ++fileIt) {
       cmSourceFile* sf = *fileIt;
@@ -803,19 +770,13 @@ void cmQtAutoGeneratorInitializer::InitializeAutogenTarget(
       if (target->GetPropertyAsBool("AUTORCC")) {
         if (ext == "qrc" &&
             !cmSystemTools::IsOn(sf->GetPropertyForUser("SKIP_AUTORCC"))) {
-
           {
-            std::string rcc_output_dir = GetAutogenTargetBuildDir(target);
-            rcc_output_dir += GetSourceRelativePath(target, absFile);
-            cmSystemTools::MakeDirectory(rcc_output_dir.c_str());
-
-            std::string basename =
-              cmsys::SystemTools::GetFilenameWithoutLastExtension(absFile);
-            std::string rcc_output_file = rcc_output_dir;
-            rcc_output_file += "qrc_" + basename + ".cpp";
+            std::string rcc_output_file = GetAutogenTargetBuildDir(target);
+            // Create output directory
+            cmSystemTools::MakeDirectory(rcc_output_file.c_str());
+            rcc_output_file += fpathUuid.get(absFile, "qrc_", ".cpp");
             rcc_output.push_back(rcc_output_file);
           }
-
           if (!cmSystemTools::IsOn(sf->GetPropertyForUser("GENERATED"))) {
             if (qtMajorVersion == "5") {
               ListQt5RccInputs(sf, target, depends);

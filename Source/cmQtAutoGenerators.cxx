@@ -1,32 +1,29 @@
-/*============================================================================
-  CMake - Cross Platform Makefile Generator
-  Copyright 2004-2011 Kitware, Inc.
-  Copyright 2011 Alexander Neundorf (neundorf@kde.org)
-
-  Distributed under the OSI-approved BSD License (the "License");
-  see accompanying file Copyright.txt for details.
-
-  This software is distributed WITHOUT ANY WARRANTY; without even the
-  implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
-  See the License for more information.
-============================================================================*/
-
+/* Distributed under the OSI-approved BSD 3-Clause License.  See accompanying
+   file Copyright.txt or https://cmake.org/licensing for details.  */
 #include "cmQtAutoGenerators.h"
 
 #include "cmAlgorithms.h"
+#include "cmFilePathUuid.h"
 #include "cmGlobalGenerator.h"
 #include "cmMakefile.h"
 #include "cmOutputConverter.h"
 #include "cmState.h"
 #include "cmSystemTools.h"
+#include "cm_auto_ptr.hxx"
+#include "cmake.h"
 
-#include <sys/stat.h>
-
+#include <algorithm>
 #include <assert.h>
+#include <cmConfigure.h>
 #include <cmsys/FStream.hxx>
+#include <cmsys/RegularExpression.hxx>
 #include <cmsys/Terminal.h>
-
+#include <iostream>
+#include <sstream>
+#include <stdlib.h>
 #include <string.h>
+#include <utility>
+
 #if defined(__APPLE__)
 #include <unistd.h>
 #endif
@@ -34,8 +31,8 @@
 static bool requiresMocing(const std::string& text, std::string& macroName)
 {
   // this simple check is much much faster than the regexp
-  if (strstr(text.c_str(), "Q_OBJECT") == NULL &&
-      strstr(text.c_str(), "Q_GADGET") == NULL) {
+  if (strstr(text.c_str(), "Q_OBJECT") == CM_NULLPTR &&
+      strstr(text.c_str(), "Q_GADGET") == CM_NULLPTR) {
     return false;
   }
 
@@ -87,8 +84,25 @@ static std::string extractSubDir(const std::string& absPath,
   return subDir;
 }
 
+static bool FileNameIsUnique(const std::string& filePath,
+                             const std::map<std::string, std::string>& fileMap)
+{
+  size_t count(0);
+  const std::string fileName = cmsys::SystemTools::GetFilenameName(filePath);
+  for (std::map<std::string, std::string>::const_iterator si = fileMap.begin();
+       si != fileMap.end(); ++si) {
+    if (cmsys::SystemTools::GetFilenameName(si->first) == fileName) {
+      ++count;
+      if (count > 1) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
 cmQtAutoGenerators::cmQtAutoGenerators()
-  : Verbose(cmsys::SystemTools::GetEnv("VERBOSE") != 0)
+  : Verbose(cmsys::SystemTools::HasEnv("VERBOSE"))
   , ColorOutput(true)
   , RunMocFailed(false)
   , RunUicFailed(false)
@@ -155,7 +169,7 @@ bool cmQtAutoGenerators::Run(const std::string& targetDirectory,
   snapshot.GetDirectory().SetCurrentBinary(targetDirectory);
   snapshot.GetDirectory().SetCurrentSource(targetDirectory);
 
-  cmsys::auto_ptr<cmMakefile> mf(new cmMakefile(&gg, snapshot));
+  CM_AUTO_PTR<cmMakefile> mf(new cmMakefile(&gg, snapshot));
   gg.SetCurrentMakefile(mf.get());
 
   this->ReadAutogenInfoFile(mf.get(), targetDirectory, config);
@@ -363,6 +377,7 @@ void cmQtAutoGenerators::Init()
 
   this->OutMocCppFilenameRel = this->TargetName;
   this->OutMocCppFilenameRel += ".cpp";
+
   this->OutMocCppFilenameAbs = this->Builddir + this->OutMocCppFilenameRel;
 
   std::vector<std::string> cdefList;
@@ -432,7 +447,7 @@ void cmQtAutoGenerators::Init()
 static std::string ReadAll(const std::string& filename)
 {
   cmsys::ifstream file(filename.c_str());
-  std::stringstream stream;
+  std::ostringstream stream;
   stream << file.rdbuf();
   file.close();
   return stream.str();
@@ -477,7 +492,7 @@ bool cmQtAutoGenerators::RunAutogen(cmMakefile* makefile)
       skipUic ? skippedUis : includedUis;
     const std::string& absFilename = *it;
     if (this->Verbose) {
-      std::stringstream err;
+      std::ostringstream err;
       err << "AUTOGEN: Checking " << absFilename << std::endl;
       this->LogInfo(err.str());
     }
@@ -499,7 +514,7 @@ bool cmQtAutoGenerators::RunAutogen(cmMakefile* makefile)
           uicSkipped.end()) {
         const std::string& absFilename = *it;
         if (this->Verbose) {
-          std::stringstream err;
+          std::ostringstream err;
           err << "AUTOGEN: Checking " << absFilename << std::endl;
           this->LogInfo(err.str());
         }
@@ -527,19 +542,19 @@ bool cmQtAutoGenerators::RunAutogen(cmMakefile* makefile)
   }
 
   if (this->RunMocFailed) {
-    std::stringstream err;
+    std::ostringstream err;
     err << "moc failed..." << std::endl;
     this->LogError(err.str());
     return false;
   }
   if (this->RunUicFailed) {
-    std::stringstream err;
+    std::ostringstream err;
     err << "uic failed..." << std::endl;
     this->LogError(err.str());
     return false;
   }
   if (this->RunRccFailed) {
-    std::stringstream err;
+    std::ostringstream err;
     err << "rcc failed..." << std::endl;
     this->LogError(err.str());
     return false;
@@ -560,7 +575,7 @@ void cmQtAutoGenerators::ParseCppFile(
 
   const std::string contentsString = ReadAll(absFilename);
   if (contentsString.empty()) {
-    std::stringstream err;
+    std::ostringstream err;
     err << "AUTOGEN: warning: " << absFilename << ": file is empty\n"
         << std::endl;
     this->LogError(err.str());
@@ -588,7 +603,7 @@ void cmQtAutoGenerators::ParseCppFile(
   // first a simple string check for "moc" is *much* faster than the regexp,
   // and if the string search already fails, we don't have to try the
   // expensive regexp
-  if ((strstr(contentsString.c_str(), "moc") != NULL) &&
+  if ((strstr(contentsString.c_str(), "moc") != CM_NULLPTR) &&
       (mocIncludeRegExp.find(contentsString))) {
     // for every moc include in the file
     do {
@@ -620,7 +635,7 @@ void cmQtAutoGenerators::ParseCppFile(
             ownMocHeaderFile = headerToMoc;
           }
         } else {
-          std::stringstream err;
+          std::ostringstream err;
           err << "AUTOGEN: error: " << absFilename << ": The file "
               << "includes the moc file \"" << currentMoc << "\", "
               << "but could not find header \"" << basename << '{'
@@ -636,15 +651,15 @@ void cmQtAutoGenerators::ParseCppFile(
         }
       } else {
         std::string fileToMoc = absFilename;
-        if ((basename != scannedFileBasename) || (requiresMoc == false)) {
+        if (!requiresMoc || basename != scannedFileBasename) {
           std::string mocSubDir = extractSubDir(absPath, currentMoc);
           std::string headerToMoc =
             findMatchingHeader(absPath, mocSubDir, basename, headerExtensions);
           if (!headerToMoc.empty()) {
             // this is for KDE4 compatibility:
             fileToMoc = headerToMoc;
-            if ((requiresMoc == false) && (basename == scannedFileBasename)) {
-              std::stringstream err;
+            if (!requiresMoc && basename == scannedFileBasename) {
+              std::ostringstream err;
               err << "AUTOGEN: warning: " << absFilename
                   << ": The file "
                      "includes the moc file \""
@@ -656,7 +671,7 @@ void cmQtAutoGenerators::ParseCppFile(
                   << std::endl;
               this->LogError(err.str());
             } else {
-              std::stringstream err;
+              std::ostringstream err;
               err << "AUTOGEN: warning: " << absFilename
                   << ": The file "
                      "includes the moc file \""
@@ -670,7 +685,7 @@ void cmQtAutoGenerators::ParseCppFile(
               this->LogError(err.str());
             }
           } else {
-            std::stringstream err;
+            std::ostringstream err;
             err << "AUTOGEN: error: " << absFilename
                 << ": The file "
                    "includes the moc file \""
@@ -696,10 +711,10 @@ void cmQtAutoGenerators::ParseCppFile(
   // If this is the case, the moc_foo.cpp should probably be generated from
   // foo.cpp instead of foo.h, because otherwise it won't build.
   // But warn, since this is not how it is supposed to be used.
-  if ((dotMocIncluded == false) && (requiresMoc == true)) {
-    if (mocUnderscoreIncluded == true) {
+  if (!dotMocIncluded && requiresMoc) {
+    if (mocUnderscoreIncluded) {
       // this is for KDE4 compatibility:
-      std::stringstream err;
+      std::ostringstream err;
       err << "AUTOGEN: warning: " << absFilename << ": The file "
           << "contains a " << macroName << " macro, but does not "
                                            "include "
@@ -717,7 +732,7 @@ void cmQtAutoGenerators::ParseCppFile(
       includedMocs.erase(ownMocHeaderFile);
     } else {
       // otherwise always error out since it will not compile:
-      std::stringstream err;
+      std::ostringstream err;
       err << "AUTOGEN: error: " << absFilename << ": The file "
           << "contains a " << macroName << " macro, but does not "
                                            "include "
@@ -742,7 +757,7 @@ void cmQtAutoGenerators::StrictParseCppFile(
 
   const std::string contentsString = ReadAll(absFilename);
   if (contentsString.empty()) {
-    std::stringstream err;
+    std::ostringstream err;
     err << "AUTOGEN: warning: " << absFilename << ": file is empty\n"
         << std::endl;
     this->LogError(err.str());
@@ -765,7 +780,7 @@ void cmQtAutoGenerators::StrictParseCppFile(
   // first a simple string check for "moc" is *much* faster than the regexp,
   // and if the string search already fails, we don't have to try the
   // expensive regexp
-  if ((strstr(contentsString.c_str(), "moc") != NULL) &&
+  if ((strstr(contentsString.c_str(), "moc") != CM_NULLPTR) &&
       (mocIncludeRegExp.find(contentsString))) {
     // for every moc include in the file
     do {
@@ -791,7 +806,7 @@ void cmQtAutoGenerators::StrictParseCppFile(
         if (!headerToMoc.empty()) {
           includedMocs[headerToMoc] = currentMoc;
         } else {
-          std::stringstream err;
+          std::ostringstream err;
           err << "AUTOGEN: error: " << absFilename << " The file "
               << "includes the moc file \"" << currentMoc << "\", "
               << "but could not find header \"" << basename << '{'
@@ -807,7 +822,7 @@ void cmQtAutoGenerators::StrictParseCppFile(
         }
       } else {
         if (basename != scannedFileBasename) {
-          std::stringstream err;
+          std::ostringstream err;
           err << "AUTOGEN: error: " << absFilename
               << ": The file "
                  "includes the moc file \""
@@ -833,10 +848,9 @@ void cmQtAutoGenerators::StrictParseCppFile(
   // foo.cpp instead of foo.h, because otherwise it won't build.
   // But warn, since this is not how it is supposed to be used.
   std::string macroName;
-  if ((dotMocIncluded == false) &&
-      (requiresMocing(contentsString, macroName))) {
+  if (!dotMocIncluded && requiresMocing(contentsString, macroName)) {
     // otherwise always error out since it will not compile:
-    std::stringstream err;
+    std::ostringstream err;
     err << "AUTOGEN: error: " << absFilename << ": The file "
         << "contains a " << macroName << " macro, but does not include "
         << "\"" << scannedFileBasename << ".moc\" !\n"
@@ -855,7 +869,7 @@ void cmQtAutoGenerators::ParseForUic(
   }
   const std::string contentsString = ReadAll(absFilename);
   if (contentsString.empty()) {
-    std::stringstream err;
+    std::ostringstream err;
     err << "AUTOGEN: warning: " << absFilename << ": file is empty\n"
         << std::endl;
     this->LogError(err.str());
@@ -880,7 +894,7 @@ void cmQtAutoGenerators::ParseForUic(
   const std::string realName = cmsys::SystemTools::GetRealPath(absFilename);
 
   matchOffset = 0;
-  if ((strstr(contentsString.c_str(), "ui_") != NULL) &&
+  if ((strstr(contentsString.c_str(), "ui_") != CM_NULLPTR) &&
       (uiIncludeRegExp.find(contentsString))) {
     do {
       const std::string currentUi = uiIncludeRegExp.match(1);
@@ -935,6 +949,8 @@ void cmQtAutoGenerators::ParseHeaders(
   std::map<std::string, std::string>& notIncludedMocs,
   std::map<std::string, std::vector<std::string> >& includedUis)
 {
+  cmFilePathUuid fpathUuid(this->Srcdir, this->Builddir,
+                           this->ProjectSourceDir, this->ProjectBinaryDir);
   for (std::set<std::string>::const_iterator hIt = absHeaders.begin();
        hIt != absHeaders.end(); ++hIt) {
     const std::string& headerName = *hIt;
@@ -943,19 +959,15 @@ void cmQtAutoGenerators::ParseHeaders(
     if (!this->MocExecutable.empty() &&
         includedMocs.find(headerName) == includedMocs.end()) {
       if (this->Verbose) {
-        std::stringstream err;
+        std::ostringstream err;
         err << "AUTOGEN: Checking " << headerName << std::endl;
         this->LogInfo(err.str());
       }
 
       std::string macroName;
       if (requiresMocing(contents, macroName)) {
-        const std::string parentDir =
-          this->TargetBuildSubDir + this->SourceRelativePath(headerName);
-        const std::string basename =
-          cmsys::SystemTools::GetFilenameWithoutLastExtension(headerName);
-        const std::string currentMoc = parentDir + "moc_" + basename + ".cpp";
-        notIncludedMocs[headerName] = currentMoc;
+        notIncludedMocs[headerName] =
+          this->TargetBuildSubDir + fpathUuid.get(headerName, "moc_", ".cpp");
       }
     }
     this->ParseForUic(headerName, contents, includedUis);
@@ -973,7 +985,7 @@ bool cmQtAutoGenerators::GenerateMocFiles(
     std::map<std::string, std::string> mergedMocs(includedMocs);
     mergedMocs.insert(notIncludedMocs.begin(), notIncludedMocs.end());
     if (this->NameCollisionTest(mergedMocs, collisions)) {
-      std::stringstream err;
+      std::ostringstream err;
       err << "AUTOGEN: error: "
              "The same moc file will be generated "
              "from different sources."
@@ -1014,7 +1026,7 @@ bool cmQtAutoGenerators::GenerateMocFiles(
   // compose _automoc.cpp content
   std::string automocSource;
   {
-    std::stringstream outStream;
+    std::ostringstream outStream;
     outStream << "/* This file is autogenerated, do not edit*/\n";
     if (notIncludedMocs.empty()) {
       outStream << "enum some_compilers { need_more_than_nothing };\n";
@@ -1036,7 +1048,7 @@ bool cmQtAutoGenerators::GenerateMocFiles(
     if (oldContents == automocSource) {
       // nothing changed: don't touch the _automoc.cpp file
       if (this->Verbose) {
-        std::stringstream err;
+        std::ostringstream err;
         err << "AUTOGEN: " << this->OutMocCppFilenameRel << " still up to date"
             << std::endl;
         this->LogInfo(err.str());
@@ -1107,7 +1119,7 @@ bool cmQtAutoGenerators::GenerateMoc(const std::string& sourceFile,
     bool result =
       cmSystemTools::RunSingleCommand(command, &output, &output, &retVal);
     if (!result || retVal) {
-      std::stringstream err;
+      std::ostringstream err;
       err << "AUTOGEN: error: process for " << mocFilePath << " failed:\n"
           << output << std::endl;
       this->LogError(err.str());
@@ -1148,7 +1160,7 @@ bool cmQtAutoGenerators::GenerateUiFiles(
   {
     std::multimap<std::string, std::string> collisions;
     if (this->NameCollisionTest(testMap, collisions)) {
-      std::stringstream err;
+      std::ostringstream err;
       err << "AUTOGEN: error: The same ui_NAME.h file will be generated "
              "from different sources."
           << std::endl
@@ -1186,7 +1198,7 @@ bool cmQtAutoGenerators::GenerateUi(const std::string& realName,
     cmsys::SystemTools::MakeDirectory(this->Builddir.c_str());
   }
 
-  const ::std::string uiBuildFile = this->Builddir + uiOutputFile;
+  const std::string uiBuildFile = this->Builddir + uiOutputFile;
 
   int sourceNewerThanUi = 0;
   bool success = cmsys::SystemTools::FileTimeCompare(uiInputFile, uiBuildFile,
@@ -1224,7 +1236,7 @@ bool cmQtAutoGenerators::GenerateUi(const std::string& realName,
     bool result =
       cmSystemTools::RunSingleCommand(command, &output, &output, &retVal);
     if (!result || retVal) {
-      std::stringstream err;
+      std::ostringstream err;
       err << "AUTOUIC: error: process for " << uiOutputFile
           << " needed by\n \"" << realName << "\"\nfailed:\n"
           << output << std::endl;
@@ -1258,17 +1270,18 @@ bool cmQtAutoGenerators::GenerateQrcFiles()
 {
   // generate single map with input / output names
   std::map<std::string, std::string> qrcGenMap;
-  for (std::vector<std::string>::const_iterator si = this->RccSources.begin();
-       si != this->RccSources.end(); ++si) {
-    const std::string ext = cmsys::SystemTools::GetFilenameLastExtension(*si);
-    if (ext == ".qrc") {
-      std::string basename =
-        cmsys::SystemTools::GetFilenameWithoutLastExtension(*si);
-      std::string qrcOutputFile = this->TargetBuildSubDir +
-        this->SourceRelativePath(*si) + "qrc_" + basename + ".cpp";
-      // std::string qrcOutputFile = "CMakeFiles/" + this->OriginTargetName
-      //                         + ".dir/qrc_" + basename + ".cpp";
-      qrcGenMap[*si] = qrcOutputFile;
+  {
+    cmFilePathUuid fpathUuid(this->Srcdir, this->Builddir,
+                             this->ProjectSourceDir, this->ProjectBinaryDir);
+    for (std::vector<std::string>::const_iterator si =
+           this->RccSources.begin();
+         si != this->RccSources.end(); ++si) {
+      const std::string ext =
+        cmsys::SystemTools::GetFilenameLastExtension(*si);
+      if (ext == ".qrc") {
+        qrcGenMap[*si] =
+          (this->TargetBuildSubDir + fpathUuid.get(*si, "qrc_", ".cpp"));
+      }
     }
   }
 
@@ -1276,7 +1289,7 @@ bool cmQtAutoGenerators::GenerateQrcFiles()
   {
     std::multimap<std::string, std::string> collisions;
     if (this->NameCollisionTest(qrcGenMap, collisions)) {
-      std::stringstream err;
+      std::ostringstream err;
       err << "AUTOGEN: error: The same qrc_NAME.cpp file"
              " will be generated from different sources."
           << std::endl
@@ -1290,7 +1303,8 @@ bool cmQtAutoGenerators::GenerateQrcFiles()
   for (std::map<std::string, std::string>::const_iterator si =
          qrcGenMap.begin();
        si != qrcGenMap.end(); ++si) {
-    if (!this->GenerateQrc(si->first, si->second)) {
+    bool unique = FileNameIsUnique(si->first, qrcGenMap);
+    if (!this->GenerateQrc(si->first, si->second, unique)) {
       if (this->RunRccFailed) {
         return false;
       }
@@ -1300,13 +1314,24 @@ bool cmQtAutoGenerators::GenerateQrcFiles()
 }
 
 bool cmQtAutoGenerators::GenerateQrc(const std::string& qrcInputFile,
-                                     const std::string& qrcOutputFile)
+                                     const std::string& qrcOutputFile,
+                                     bool unique_n)
 {
-  std::string relName = this->SourceRelativePath(qrcInputFile);
-  std::replace(relName.begin(), relName.end(), '/', '_');
-  relName += cmsys::SystemTools::GetFilenameWithoutLastExtension(qrcInputFile);
+  std::string symbolName;
+  if (unique_n) {
+    symbolName =
+      cmsys::SystemTools::GetFilenameWithoutLastExtension(qrcInputFile);
+  } else {
+    symbolName =
+      cmsys::SystemTools::GetFilenameWithoutLastExtension(qrcOutputFile);
+    // Remove "qrc_" at string begin
+    symbolName.erase(0, 4);
+  }
+  // Replace '-' with '_'. The former is valid for
+  // file names but not for symbol names.
+  std::replace(symbolName.begin(), symbolName.end(), '-', '_');
 
-  const ::std::string qrcBuildFile = this->Builddir + qrcOutputFile;
+  const std::string qrcBuildFile = this->Builddir + qrcOutputFile;
 
   int sourceNewerThanQrc = 0;
   bool generateQrc = !cmsys::SystemTools::FileTimeCompare(
@@ -1332,7 +1357,7 @@ bool cmQtAutoGenerators::GenerateQrc(const std::string& qrcInputFile,
     }
 
     command.push_back("-name");
-    command.push_back(relName);
+    command.push_back(symbolName);
     command.push_back("-o");
     command.push_back(qrcBuildFile);
     command.push_back(qrcInputFile);
@@ -1345,7 +1370,7 @@ bool cmQtAutoGenerators::GenerateQrc(const std::string& qrcInputFile,
     bool result =
       cmSystemTools::RunSingleCommand(command, &output, &output, &retVal);
     if (!result || retVal) {
-      std::stringstream err;
+      std::ostringstream err;
       err << "AUTORCC: error: process for " << qrcOutputFile << " failed:\n"
           << output << std::endl;
       this->LogError(err.str());
@@ -1355,49 +1380,6 @@ bool cmQtAutoGenerators::GenerateQrc(const std::string& qrcInputFile,
     }
   }
   return true;
-}
-
-std::string cmQtAutoGenerators::SourceRelativePath(const std::string& filename)
-{
-  std::string pathRel;
-
-  // Test if the file is child to any of the known directories
-  {
-    std::string fileNameReal = cmsys::SystemTools::GetRealPath(filename);
-    std::string parentDirectory;
-    bool match(false);
-    {
-      const ::std::string* testDirs[4];
-      testDirs[0] = &(this->Srcdir);
-      testDirs[1] = &(this->Builddir);
-      testDirs[2] = &(this->ProjectSourceDir);
-      testDirs[3] = &(this->ProjectBinaryDir);
-      for (int ii = 0; ii != sizeof(testDirs) / sizeof(const ::std::string*);
-           ++ii) {
-        const ::std::string testDir =
-          cmsys::SystemTools::GetRealPath(*(testDirs[ii]));
-        if (cmsys::SystemTools::IsSubDirectory(fileNameReal, testDir)) {
-          parentDirectory = testDir;
-          match = true;
-          break;
-        }
-      }
-    }
-    // Use root as fallback parent directory
-    if (!match) {
-      cmsys::SystemTools::SplitPathRootComponent(fileNameReal,
-                                                 &parentDirectory);
-    }
-    pathRel = cmsys::SystemTools::RelativePath(
-      parentDirectory, cmsys::SystemTools::GetParentDirectory(fileNameReal));
-  }
-
-  // Sanitize relative path
-  if (!pathRel.empty()) {
-    pathRel += '/';
-    cmSystemTools::ReplaceString(pathRel, "..", "__");
-  }
-  return pathRel;
 }
 
 /**
@@ -1436,7 +1418,7 @@ void cmQtAutoGenerators::NameCollisionLog(
 {
   typedef std::multimap<std::string, std::string>::const_iterator Iter;
 
-  std::stringstream err;
+  std::ostringstream err;
   // Add message
   err << message;
   // Append collision list
@@ -1458,7 +1440,7 @@ void cmQtAutoGenerators::LogError(const std::string& message)
 
 void cmQtAutoGenerators::LogCommand(const std::vector<std::string>& command)
 {
-  std::stringstream sbuf;
+  std::ostringstream sbuf;
   for (std::vector<std::string>::const_iterator cmdIt = command.begin();
        cmdIt != command.end(); ++cmdIt) {
     if (cmdIt != command.begin()) {

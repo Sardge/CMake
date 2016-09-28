@@ -25,7 +25,7 @@ run_cmake(TargetTypeInvalid)
 run_cmake(TargetTypeStatic)
 
 run_cmake(CMP0056)
-run_cmake(CompileFlags)
+run_cmake(CMP0066)
 
 if(RunCMake_GENERATOR MATCHES "Make|Ninja")
   # Use a single build tree for a few tests without cleaning.

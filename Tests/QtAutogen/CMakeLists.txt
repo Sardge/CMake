@@ -112,7 +112,7 @@ set_target_properties(
 
 # Test AUTOMOC and AUTORCC on source files with the same name
 # but in different subdirectories
-add_subdirectory(same_name)
+add_subdirectory(sameName)
 
 include(GenerateExportHeader)
 # The order is relevant here. B depends on A, and B headers depend on A
